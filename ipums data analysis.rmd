@@ -1,0 +1,291 @@
+---
+title: "IPUMS Data Analysis"
+author: "Yang"
+date: "May 22, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Read IPUMS Dataset
+```{r}
+library(tidyverse)
+library(survey)
+library(srvyr)
+```
+```{r}
+ipums <- read.csv(file="C:/Program Files/RStudio/ipums.csv", header=TRUE, sep=",")
+ipums_complete=ipums %>% filter(complete.cases(.))
+attach(ipums_complete)
+```
+
+#Simple Random Sample Approach
+
+##Determine desired sample size of SRS
+```{r}
+set.seed(19961021)
+IPUMS_SRS_50= ipums_complete %>% slice(sample(1:nrow(ipums_complete),size=50, replace=F))
+Inctot=IPUMS_SRS_50$Inctot
+abs_error=700
+S_sq=var(IPUMS_SRS_50$Inctot)
+Z=qnorm(0.975)
+n=S_sq*(Z**2)/((abs_error**2)+S_sq*(Z**2)/nrow(ipums_complete))
+round(n)
+desired_sample_size=round(n)
+```
+The desired sample size would be 599 using given absolute error e=700.
+
+##Taking SRS of size 599
+```{r}
+IPUMS_SRS_599= ipums_complete %>% slice(sample(1:nrow(ipums_complete),size=desired_sample_size, replace=F))
+IPUMS_SRS_design =survey::svydesign(id=~1,data=IPUMS_SRS_599, fpc=rep(dim(ipums_complete)[1],desired_sample_size))
+svytotal(~Inctot,IPUMS_SRS_design)
+svymean(~Inctot,IPUMS_SRS_design)
+confint(svytotal(~Inctot,IPUMS_SRS_design))
+```
+
+The estimated population total inctot is 480414915. And We are 95% confident that [434460670, 526369160] traps the true population total inctot.
+
+
+#Stratified Random Sample Approach
+
+##calculate&compare SSW using different criterion
+```{r Calculate SSW}
+SSW=function(X){
+  group_by_var=ipums_complete%>%group_by(vars=X)
+  summary_var=group_by_var%>%summarise(mean=mean(Inctot),sum=sum(Inctot),var=var(Inctot))
+  sum(summary_var$var)
+}
+
+df=data.frame(matrix(ncol = 2))
+colnames(df)=c("group by","SSW")
+for (var in colnames(ipums_complete)){
+  if(var=="Age"||var=="Sex"||var=="Marstat"||var=="Race")
+  df=rbind(df,list(var,SSW(eval(parse(text = var)))))
+}
+df_complete=df%>% filter(complete.cases(.))
+df_complete[order(df_complete$SSW),]
+```
+From the table above, we know that the strata divided by sex has the smallest SSW, therefore we divide our population according to their sex into two groups:
+
+##Divide population into strata using sex as criteria
+```{r Divide into two strata}
+counts_sex =ipums_complete%>%count(Sex)%>%mutate(prop_sex=n/sum(n))
+Sex_1=inner_join(ipums_complete,counts_sex,by="Sex")%>%group_by(Sex)%>%subset(Sex==1)
+Sex_2=inner_join(ipums_complete,counts_sex,by="Sex")%>%group_by(Sex)%>%subset(Sex==2)
+```
+
+##Draw Sample Using Proportional Allocation
+```{r SRS in each stratum}
+#determined sample size from SRS 
+set.seed(19961021)
+desired_sample_size=599
+counts_sex =ipums_complete %>%count(Sex)%>%mutate(prop_sex=n/sum(n),prop_alloc_sex=round(counts_sex$prop_sex*desired_sample_size))
+
+#draw sample by from sex1 and sex2 proportionally(proportional allocation)
+Str_sample_599=inner_join(ipums_complete,counts_sex,by="Sex")%>%group_by(Sex)%>%slice(sample(1:n,size=prop_alloc_sex,replace=F))
+
+ipums_str_prop=svydesign(~1,strata=~Sex,data=Str_sample_599,fpc =~n)
+svytotal(~Inctot,ipums_str_prop)
+confint(svytotal(~Inctot,ipums_str_prop))
+```
+Note: the sample size drawn from each sex group is determined by $desired~sample~size*\frac{number~of~individuals~in~sex~group~1}{total~number~of~individuals}$. 
+The estimated population total inctot is 521658518. And We are 95% confident that [479924309, 563392727] traps the true population total inctot.
+
+
+##Draw Sample Using Optimal Allocation
+```{r}
+pilot_sample_size=200
+Str_sample_200_sex=inner_join(ipums_complete,counts_sex,by="Sex")%>%group_by(Sex)%>%slice(sample(1:n,size=pilot_sample_size,replace=F))
+Sex_1_pilot=Str_sample_200_sex%>%subset(Sex==1)
+Sex_2_pilot=Str_sample_200_sex%>%subset(Sex==2)
+#calculate sample size in each strata 
+std_sex1=sqrt(var(Sex_1_pilot$Inctot))
+std_sex2=sqrt(var(Sex_2_pilot$Inctot))
+v1=std_sex1**2
+v2=std_sex2**2
+temp1=std_sex1*counts_sex$n[1]
+temp2=std_sex2*counts_sex$n[2]
+temp_total=temp1+temp2
+n1=round(temp1/temp_total*desired_sample_size)
+n2=round(temp2/temp_total*desired_sample_size)
+
+Str_optimal=inner_join(ipums_complete,counts_sex,by="Sex")%>%group_by(Sex)%>%slice(sample(1:n,size=rbind(n1,n2),replace=F))
+
+ipums_str_optimal=svydesign(~1,strata=~Sex,data=Str_optimal,fpc =~n)
+svytotal(~Inctot,ipums_str_optimal)
+confint(svytotal(~Inctot,ipums_str_optimal))
+```
+The estimated population total inctot is 501677127. And We are 95% confident that [469171924, 542675441] traps the true population total inctot.
+
+##Comparing Variances
+```{r}
+library(scales)
+percent(((v1-v2)/v2))
+```
+
+Optimal allocation performs better than proportional allocation when variances of strata or costs of strata vary greatly. In our case, the relative difference between variance of group 1(Sex=1) over group 2(Sex=2) is 514%. Therefore, assuming that the costs of drawing sample from sex group 1 and sex group 2 are equal, it is reasonable for us to sample more heavily from group 1 to compensate.
+
+##Comparing Results from prop alloc and opt alloc
+```{r}
+##estimation using proportional allocation
+svytotal(~Inctot,ipums_str_prop)
+confint(svytotal(~Inctot,ipums_str_prop))
+```
+```{r}
+##estimation using optimal allocation
+svytotal(~Inctot,ipums_str_optimal)
+confint(svytotal(~Inctot,ipums_str_optimal))
+```
+```{r}
+##True population total
+sum(ipums_complete$Inctot)
+```
+
+Comparing the estimation and CI yielded from stratified random sampling(strata criteria="Sex"), using proportional allocation and optimal allocation, it's obvious that the sample drawn from optimal allocation has a smaller variance and thus we can infer better from its confidence interval. Besides, the estimated total Inctot from optimal allocation is closer to the true population total Inctot. Therefore, we can conclude that stratified random sampling(strata criteria="Sex") with optimal allocation is better than that with proportional allocation.
+
+In all, the stratification using **Sex** does bring an increment of in the precison of estimated total than from the SRS taken in Chapter 2. Built upon that, optimal allocation further improve the performance than proportional allocation. 
+
+```{r}
+df2=data.frame(matrix(ncol = 2))
+colnames(df2)=c("group by","SSW")
+Vars=colnames(ipums_complete)
+for (var in Vars[4:length(Vars)]){
+  SSW(eval(parse(text = var)))
+  list(var,SSW(eval(parse(text = var))))
+  df2=rbind(df2,list(var,SSW(eval(parse(text = var)))))
+}
+df_complete2=df2%>% filter(complete.cases(.))
+df_complete2[order(df_complete2$SSW),]
+```
+If the stratification could be done using different criterion, we would look into this using another variable, such as $School$(since it has the smallest SSW which maximize the SSB), to create strata.
+
+#Ratio Estimator
+```{r}
+##take SRS sample of size 599
+set.seed(19961021)
+desired_sample_size=599
+ipums_srs599=ipums_complete%>%slice(sample(1:nrow(ipums_complete), size=desired_sample_size, replace=F))%>%mutate(fpc =nrow(ipums_complete))
+ipums_srs_design=svydesign(ids=~1,data=ipums_srs599,fpc=~fpc)
+##ratio estimation
+ipums_totals = ipums_complete%>% summarise(T_inctot =sum(Inctot),T_age =sum(Age),B = T_inctot/T_age)
+ipums_totals
+r=svyratio(~Inctot,~Age,ipums_srs_design)
+r
+##Confidence interval
+confint(r)
+##predicted r
+predicted_r=predict(r,total=ipums_totals%>%pull(T_age))
+predicted_r
+
+#comparing result
+##SRS result
+svytotal(~Inctot,ipums_srs_design)
+confint(svytotal(~Inctot, ipums_srs_design))
+##ratio estimator 95% CI
+predicted_r$total+c(qnorm(0.025),qnorm(0.975))*predicted_r$se
+##True total
+ipums_complete$Inctot%>%sum()
+##
+ggplot(ipums_srs599,aes(x=Age,y=Inctot))+geom_point()+geom_abline(intercept=0,slope=r[[1]],color="red")
+```
+The estimated population total inctot is 461964177. And We are 95% confident that [419427018, 504501335] traps the true population total inctot.
+
+Note that the standard error of ratio estimator(SE=21703031) is lower than that of SRS estimator(SE=23446474).
+
+
+#Cluster Sampling
+
+##Frequency table
+```{r}
+t=table(ipums_complete$Psu)
+barplot(t,xlab = "Psu",ylab = "Frequency")
+```
+
+```{r}
+num_psu = ipums_complete %>% summarise(Num_Clusters = n_distinct(Psu))
+num_psu
+
+onestagecluster_sample = ipums_complete %>% filter(Psu %in% sample(unique(Psu),size=10))
+onestagecluster_sample %>% summarise(Num_Clusters = n_distinct(Psu))
+```
+
+```{r}
+#calculating total SSUs with same cost as SRS
+totalcost=50*599
+total_ssus=round((totalcost-10*100)/20)
+#proportional allocation
+counts_psu =onestagecluster_sample%>%count(Psu)%>%mutate(prop_psu=n/sum(n))
+counts_psu=onestagecluster_sample%>%count(Psu)%>%mutate(prop_psu=n/sum(n),prop_alloc_psu=round(counts_psu$prop_psu*total_ssus))
+onestagecluster_sample = onestagecluster_sample %>% inner_join(counts_psu,by="Psu")%>% rename(fpc2=prop_alloc_psu)
+
+index=c(1:dim(onestagecluster_sample)[1])
+onestagecluster_sample$id=index
+onestagecluster_sample=onestagecluster_sample%>%mutate(fpc1 = num_psu%>%pull(Num_Clusters))
+```
+
+```{r}
+twostagecluster_sample= onestagecluster_sample %>% group_by(Psu)%>%slice(sample(1:n,size=fpc2,replace=F))
+```
+
+```{r}
+twostage_design = svydesign(id=~Psu+id,fpc=~fpc1+fpc2,data=twostagecluster_sample)
+```
+
+```{r}
+svymean(~Inctot,twostage_design) 
+confint(svymean(~Inctot,twostage_design))
+```
+
+```{r}
+svytotal(~Inctot,twostage_design)
+confint(svytotal(~Inctot,twostage_design))
+```
+Result from SRS:Inctot=480414915,SE=23446474. Inctot_mean= 8986.3 SE=438.57.
+The cluster sampling yield both total inctot and average inctot with smaller SE than SRS.
+
+#Unequal Probability Sampling
+
+##unequal-probability sample of 10 psus(proportional to num of person) with Replacement
+```{r}
+set.seed(19961021)
+num_clusters = ipums_complete %>% summarise(Num_Clusters = n_distinct(Psu))
+Mi_table = ipums %>% group_by(Psu) %>% summarise(Mi = n()) %>%
+ungroup() %>% mutate(N = n())
+Mi_table = Mi_table %>% mutate(psi_i = Mi/sum(Mi))
+Mi_table
+
+##one stage sampling psus
+onestage_wr = Mi_table %>% sample_n(size=10, replace=T, weight=Mi)
+onestage_wr = onestage_wr %>% group_by(Psu) %>% mutate(replication = 1:n())
+onestage_wr %>%head()
+
+
+onestage_sample_wr = inner_join(ipums_complete,onestage_wr,by="Psu") %>%mutate(weight_1 = 1/(10*psi_i))
+onestage_sample_wr%>%head()
+Id=c(1:dim(onestage_sample_wr)[1])
+onestage_sample_wr$Id=Id
+```
+
+##Two-stage:subsample of 20 persons in each selected psus
+```{r}
+twostage_sample_wr = onestage_sample_wr %>% group_by(Psu,replication) %>%
+sample_n(size=20,replace=FALSE) %>% ungroup()
+twostage_sample_wr = twostage_sample_wr %>% mutate(weight_2=Mi/20)
+twostage_sample_wr%>%head()
+```
+
+```{r}
+twostage_cluster_wr_design = svydesign(id=~Psu+Id, data = twostage_sample_wr,
+weight = ~weight_1+weight_2)
+svytotal(~Inctot,twostage_cluster_wr_design )
+svymean(~Inctot,twostage_cluster_wr_design)
+```
+
+```{r}
+confint(svytotal(~Inctot,twostage_cluster_wr_design ))
+```
+The estimated population total inctot is 506544312. And We are 95% confident that [400519088, 612569535] traps the true population total inctot.
+
