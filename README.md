@@ -1,4 +1,4 @@
-# Summary
+# Project Summary
 The purpose of this project is to estimate the total personal income(dollars) of community in the Integrated Public Use Microdata
 Series(IPUMS) dataset,available online at www.ipums.org/usa/ (Ruggles et al., 2004).
 <br />
